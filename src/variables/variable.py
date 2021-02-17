@@ -1,8 +1,9 @@
-import abc #abstract base class handling
-from abc import ABC
+""" Holds the abstract base class Variable """
+import abc  # abstract base class handling
 import copy
 
-class Variable(ABC):
+
+class Variable(abc.ABC):
     """ Abstract base class for representations of specific measured
     values from simulations and in-situ
 
@@ -20,7 +21,7 @@ class Variable(ABC):
     Methods
     -------
     ndslice() : Variable
-        abstract method subclasses will use to slice
+        method subclasses will use to slice
     """
 
     def __init__(self, label, timeseries, mesh, data):
@@ -30,22 +31,30 @@ class Variable(ABC):
         self.mesh = mesh
         self.data = data
 
-    def ndslice(self, timelims = None, zooms = None, set_pts = None, 
-                interp = 'linear'):
+    def ndslice(self, timelims=None, zooms=None, set_pts=None,
+                interp='linear'):
         """ Returns a Variable which as a slice of the current Variable
-        
+
         Parameters
         ----------
         timelims : list, default None
-            list containing [tmin,tmax] for the slice. 'None' takes the whole timeseries.
+            list containing [tmin,tmax] for the slice.
+            'None' takes the whole timeseries.
         zooms : array (N,2) default None
             array specifying boundaries for zooming into the data
+            if you are doing a slice which is parallel to a face of the mesh,
+            e.g. is defined by a single x,y,or z value like x = 5,
+            SET IT THIS WAY using [xmin,xmax] = [5-dx/2,5+dx/2]
+            for dx the grid spacing in x
         set_pts : list, default None
-            2 or 3-element list containing spatial coordinates defining the nd section
-            of the data to take. 'None' takes the whole space (should be used for in-situ data).
+            2 or 3-element list containing spatial coordinates
+            defining the nd section of the data to take.
+            'None' takes the whole space (should be used for in-situ data).
+            currently ONLY FOR 1D SLICES (2 pts) because 3d slices become weird
+            shapes and are too hard for right now
         interp : string, default 'linear'
             determines interpolation for values in between the mesh
-            
+
         Returns
         -------
         slicedvar : Variable
@@ -64,18 +73,14 @@ class Variable(ABC):
 
         return slicedvar
 
-    @abstractmethod
+    @abc.abstractmethod
     def _zoom(self, zooms):
         pass
 
-    @abstractmethod
+    @abc.abstractmethod
     def _timeslice(self, timelims):
         pass
 
-    @abstractmethod
+    @abc.abstractmethod
     def _spaceslice(self, set_pts, interp):
         pass
-
-
-        
-        
