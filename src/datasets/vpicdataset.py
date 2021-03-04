@@ -1,4 +1,6 @@
+""" Holds the VPIC dataset handling class."""
 import numpy as np
+import scipy.integrate as integ
 import pyvpic
 from dataframework.src.datasets.dataset import Dataset
 
@@ -58,7 +60,7 @@ class VPICDataset(Dataset):
         if vpicfiles is not None:
             self._init_vpicfile(vpicfiles, **kwargs)
 
-    def _init_vpicfile(self, vpicfiles, interleave=False, get_vars=['all'],
+    def _init_vpicfile(self, vpicfiles, interleave=False, get_vars=list('all'),
                        **kwargs):
         """ Initializes the VPICDataset from VPIC output files
 
@@ -82,8 +84,8 @@ class VPICDataset(Dataset):
         reader = pyvpic.open(vpicfiles[0], interleave=interleave, **kwargs)
         raw_vars = reader.datasets
         full_mesh = [0, 0, 0]  # z,y,x (CHECK THIS IS OK)
-        t, *full_mesh = reader.get_grid(raw_vars[0])
-        self.timeseries = t  # default simulation timeline
+        t_dset, *full_mesh = reader.get_grid(raw_vars[0])
+        self.timeseries = t_dset  # default simulation timeline
         empty_dims = []
         for i in range(3):  # default mesh takes only non-redundant dimensions
             if len(full_mesh[i]) > 1:
@@ -130,4 +132,51 @@ class VPICDataset(Dataset):
         """
         # TODO: implement this
         print("NO PARAMS ADDED, FUNCTIONALIITY NOT ADDED YET!!!! SORRY")
-        pass
+
+    def calc_fluxfn(self, b1_name='bx', b2_name='bz',
+                    cumul_integrator=integ.cumtrapz, **kwargs):
+        """
+        Calculates the flux function for 2d magnetic field data.
+
+        ASSUMES the magnetic field vectors are on the same mesh
+
+        Parameters
+        ----------
+        bl_name : str, default 'bx'
+            names variable to be used as the magnetic field component
+            in the first direction
+        b2_name : str, default 'bz'
+            names variable to be used as the magnetic field component
+            in the second direction
+        cumul_integrator : function f(y, x, **kwargs)
+            function that will do the cumulative integration.
+            Should return array of length one less than the length of the
+            axis integrated along (like scipy.integrate.cumtrapz
+            with initial = None) and (at least have the option) to integrate
+            along the last axis
+        ** kwargs : dict
+            any additional keyword arguments the cumulative integrator needs
+        """
+        b1 = self.variables[b1_name]
+        b2 = self.variables[b2_name]
+
+        if len(self.default_mesh) != 2:
+            ValueError("Flux function can only be calculated on"
+                       "2-dimensional meshes, dataset is"
+                       f"{len(self.default_mesh)}-dimensional")
+        elif not (np.array_equal(b1.mesh[0], b2.mesh[0]) and
+                  np.array_equal(b1.mesh[1], b2.mesh[1])):
+            ValueError(f"Given magnetic field components {b1_name} and"
+                       f"{b2_name} do not have the same mesh, so this"
+                       " flux function calculating method is not supported."
+                       " You'll need to make something up yourself.")
+        else:
+            flux_fn = np.zeros_like(b1.data)  # flux_fn[:,0,0] = 0
+            # integrate the initial value along the first space dimension
+            flux_fn[:, 1:, 0] = cumul_integrator(b2.data[:, :, 0],
+                                                 b2.mesh[0], axis=1)
+            # integrate everything along the second space dimension
+            flux_fn[:, :, 1:] = cumul_integrator(b1.data, b1.mesh[1],
+                                                 axis=2)
+        # add the new variable
+        self._add_var('flux_fn', b1.timeseries, b1.mesh, flux_fn)

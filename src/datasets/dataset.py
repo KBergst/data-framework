@@ -1,4 +1,4 @@
-""" Holds the class dataset """
+""" Holds the class for generic datasets """
 from dataframework.src.variables.dynmeshvar import DynMeshVar
 from dataframework.src.variables.statmeshvar import StatMeshVar
 

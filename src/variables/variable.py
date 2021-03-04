@@ -64,6 +64,7 @@ class Variable(abc.ABC):
 
         slicedvar = copy.deepcopy(self)
 
+        # variable does surgery on its clone. Maybe not ~pythonic~
         if timelims is not None:
             slicedvar._timeslice(timelims)
         if zooms is not None:
