@@ -92,7 +92,20 @@ class StatMeshVar(Variable):
         flatdata = np.column_stack(tuple(self.data[i].flatten()
                                          for i in range(self.data.shape[0])))
         if interp == 'linear':
-            datainterp = scipy.interpolate.LinearNDInterpolator(pts, flatdata)
+            boxsize = np.fromiter((len(self.mesh[i]) for i in
+                                  range(len(self.mesh))), int)
+            non_deg_dims = boxsize != 1
+            if np.sum(non_deg_dims) > 1:
+                datainterp = scipy.interpolate.LinearNDInterpolator(pts,
+                                                                    flatdata)
+            elif np.sum(non_deg_dims) == 1:
+                def oned_wrapped(pts, flatdata):
+                    idx = np.nonzero(non_deg_dims)
+                    return scipy.interpolate.interp1d(pts[:, idx].flatten(),
+                                                      flatdata, axis=0)
+                datainterp = oned_wrapped(pts, flatdata)
+            else:
+                raise ValueError('all dimensions are degenerate')
         else:
             raise ValueError(f'Specified interpolation type {interp} ' +
                              'is not currently implemented')
@@ -119,16 +132,35 @@ class StatMeshVar(Variable):
             max_s = np.inf
 
             for dim in range(len(self.mesh)):  # find endpoints in t
-                min_dim = (self.mesh[dim][0]-set_pts[0][dim])/unit_vec[dim]
-                max_dim = (self.mesh[dim][-1]-set_pts[0][dim])/unit_vec[dim]
+                direction = np.sign(unit_vec[dim])
+                if direction == 0:  # no div by 0
+                    continue
+                if direction == 1:  # moving  positively in this dimension
+                    min_dim = (self.mesh[dim][0]
+                               - set_pts[0][dim])/unit_vec[dim]
+                    max_dim = (self.mesh[dim][-1]
+                               - set_pts[0][dim])/unit_vec[dim]
+                else:  # moving negatively in this dimension
+                    min_dim = (self.mesh[dim][-1]
+                               - set_pts[0][dim])/unit_vec[dim]
+                    max_dim = (self.mesh[dim][0]
+                               - set_pts[0][dim])/unit_vec[dim]
+                    
                 # refine where the line collides with the edge of the box
                 min_s = max(min_s, min_dim)
                 max_s = min(max_s, max_dim)
+            min_s += base_dir_dx/3  # try to avoid nans maybe
+            max_s -= base_dir_dx/3
             # calculate new mesh, put in list of arrays (length 1)
             mesh = [np.arange(min_s, max_s, base_dir_dx)]
             # build array in shape (timeseries,mesh)
-            dat_slice = np.vstack(tuple(datainterp(set_pts[0] + t*unit_vec)
-                                        for t in mesh[0])).T
+            if sum(non_deg_dims) == 1:
+                dat_slice = np.vstack(tuple(datainterp((set_pts[0] +
+                                            t*unit_vec)[non_deg_dims])
+                                            for t in mesh[0])).T
+            else:
+                dat_slice = np.vstack(tuple(datainterp(set_pts[0] + t*unit_vec)
+                                            for t in mesh[0])).T
 
         else:
             raise ValueError('slices in more than 1d are not currently ' +

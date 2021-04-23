@@ -146,7 +146,7 @@ class Dataset():
         defaults_var = list(self.variables.keys())[0]  # defaults to rand var
 
         for orig_var in self.variables.values():
-            if orig_var.mesh == self.default_mesh:
+            if orig_var.mesh is self.default_mesh:
                 # var for defining default mesh
                 defaults_var = orig_var.label
             new_vars[orig_var.label] = orig_var.ndslice(timelims=timelims,
@@ -156,6 +156,6 @@ class Dataset():
             
         new_timeseries = new_vars[defaults_var].timeseries
         new_mesh = new_vars[defaults_var].mesh
-        slicedset = Dataset(_datapkg=[new_timeseries, new_mesh, self.params,
-                                      new_vars])
+        slicedset = self.__class__(_datapkg=[new_timeseries, new_mesh,
+                                             self.params, new_vars])
         return slicedset

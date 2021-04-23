@@ -1,8 +1,66 @@
 """ Holds the VPIC dataset handling class."""
 import numpy as np
 import scipy.integrate as integ
+import scipy.interpolate as interp
+from scipy.ndimage import gaussian_filter
+from skimage import measure
 import pyvpic
 from dataframework.src.datasets.dataset import Dataset
+
+# Some helper functions
+
+
+def uniform(array, atol=1e-3):
+    """ Checks to see if the inputted array is sufficiently evenly spaced.
+    Uses numpy.diff and numpy.allclose
+    """
+    return np.allclose(np.diff(array), np.diff(array)[0], atol=atol)
+
+
+def ccw(A, B, C):
+    """ Test whether the three points are listed in a counterclockwise order,
+        but ~vectorized~
+    Can't handle colinear points because I'm not handling edge cases rn
+    A- array, shape (n_pts,2)
+    B- array, shape (n_pts,2)
+    C- array, shape (n_pts,2)
+    """
+    return ((C[:, 1]-A[:, 1])*(B[:, 0] - A[:, 0])
+            > (B[:, 1] - A[:, 1])*(C[:, 0] - A[:, 0]))
+
+
+def intersect_true(A, B, C, D):
+    """ Determine whether two line segments AB and CD intersect
+    A- array, shape (n_pts,2)
+    B- array, shape (n_pts,2)
+    C- array, shape (n_pts,2) (optional n_pts = 1)
+    D- array, shape (n_pts,2) (optional n_pts = 1)
+    """
+    cond1 = np.logical_not(ccw(A, C, D) == ccw(B, C, D))
+    cond2 = np.logical_not(ccw(A, B, C) == ccw(A, B, D))
+    return np.logical_and(cond1, cond2)
+
+
+def line_intersect(A, B, C, D):
+    """ Finds the intersection of the lines AB and CD, if it exists
+    Using https://en.wikipedia.org/wiki/Line%E2%80%93line_intersect \\
+    ion#Given_two_points_on_each_line_segment
+    A- array, shape (n_pts,2)
+    B- array, shape (n_pts,2)
+    C- array, shape (n_pts,2)
+    D- array, shape (n_pts,2)
+    Typically N_PTS = 1
+    """
+    denominator = ((A[:, 0] - B[:, 0])*(C[:, 1] - D[:, 1])
+                   - (A[:, 1] - B[:, 1])*(C[:, 0] - D[:, 0]))
+    px = ((A[:, 0]*B[:, 1] - A[:, 1]*B[:, 0])*(C[:, 0] - D[:, 0])
+          - (A[:, 0] - B[:, 0])*(C[:, 0]*D[:, 1] - C[:, 1]*D[:, 0])) \
+          / denominator
+    py = ((A[:, 0]*B[:, 1] - A[:, 1]*B[:, 0])*(C[:, 1] - D[:, 1])
+          - (A[:, 1] - B[:, 1])*(C[:, 0]*D[:, 1] - C[:, 1]*D[:, 0])) \
+          / denominator
+    p = np.stack([px, py], axis=1)
+    return p
 
 
 class VPICDataset(Dataset):
@@ -133,8 +191,7 @@ class VPICDataset(Dataset):
         # TODO: implement this
         print("NO PARAMS ADDED, FUNCTIONALIITY NOT ADDED YET!!!! SORRY")
 
-    def calc_fluxfn(self, b1_name='bx', b2_name='bz',
-                    cumul_integrator=integ.cumtrapz, **kwargs):
+    def calc_fluxfn(self, b1_name='bx', b2_name='bz'):
         """
         Calculates the flux function for 2d magnetic field data.
 
@@ -148,12 +205,6 @@ class VPICDataset(Dataset):
         b2_name : str, default 'bz'
             names variable to be used as the magnetic field component
             in the second direction
-        cumul_integrator : function f(y, x, **kwargs)
-            function that will do the cumulative integration.
-            Should return array of length one less than the length of the
-            axis integrated along (like scipy.integrate.cumtrapz
-            with initial = None) and (at least have the option) to integrate
-            along the last axis
         ** kwargs : dict
             any additional keyword arguments the cumulative integrator needs
         """
@@ -161,22 +212,162 @@ class VPICDataset(Dataset):
         b2 = self.variables[b2_name]
 
         if len(self.default_mesh) != 2:
-            ValueError("Flux function can only be calculated on"
-                       "2-dimensional meshes, dataset is"
-                       f"{len(self.default_mesh)}-dimensional")
-        elif not (np.array_equal(b1.mesh[0], b2.mesh[0]) and
-                  np.array_equal(b1.mesh[1], b2.mesh[1])):
-            ValueError(f"Given magnetic field components {b1_name} and"
-                       f"{b2_name} do not have the same mesh, so this"
-                       " flux function calculating method is not supported."
-                       " You'll need to make something up yourself.")
-        else:
-            flux_fn = np.zeros_like(b1.data)  # flux_fn[:,0,0] = 0
-            # integrate the initial value along the first space dimension
-            flux_fn[:, 1:, 0] = cumul_integrator(b2.data[:, :, 0],
-                                                 b2.mesh[0], axis=1)
-            # integrate everything along the second space dimension
-            flux_fn[:, :, 1:] = cumul_integrator(b1.data, b1.mesh[1],
-                                                 axis=2)
+            raise ValueError("Flux function can only be calculated on"
+                             "2-dimensional meshes, dataset is"
+                             f"{len(self.default_mesh)}-dimensional")
+        if not (np.array_equal(b1.mesh[0], b2.mesh[0]) and
+                np.array_equal(b1.mesh[1], b2.mesh[1])):
+            raise ValueError(f"Given magnetic field components {b1_name} and"
+                             f"{b2_name} do not have the same mesh, so this"
+                             " flux function calculating method is not"
+                             " supported. You'll need to make something up"
+                             " yourself.")
+        if not (uniform(b1.mesh[0]) and uniform(b1.mesh[1]) and
+                uniform(b2.mesh[0]) and uniform(b2.mesh[1])):
+            raise ValueError("inputted variables are not on uniform mesh."
+                             " This flux function calculating method is not"
+                             " Supported for this case.")
+
+        flux_fn = np.zeros_like(b1.data)  # flux_fn[:,0,0] = 0
+        # integrate the initial value along the first space dimension
+        d0 = b2.mesh[0][1] - b2.mesh[0][0]
+        flux_fn[:, :, 0] = np.cumsum(b2.data[:, :, 0]*d0, axis=1)
+        # integrate everything along the second space dimension
+        d1 = b2.mesh[1][1] - b2.mesh[1][0]
+        flux_fn = np.cumsum(-b1.data*d1, axis=2)
         # add the new variable
         self._add_var('flux_fn', b1.timeseries, b1.mesh, flux_fn)
+
+    def find_structures(self, b1_name='bx', b2_name='bz',
+                        smoothing=3, time_idx=0, **kwargs):
+        """
+        Finds the structures around the nulls of the simulation
+        for 2D VPIC data
+ 
+       Parameters
+        ----------
+        bl_name : str, default 'bx'
+            names variable to be used as the magnetic field component
+            in the first direction
+        b2_name : str, default 'bz'
+            names variable to be used as the magnetic field component
+            in the second direction
+        smoothing : int or list, default '3'
+            defines sigma of gaussian filter. Acceptable inputs are
+            a single int (for all spatial dimensions), a two element
+            list (for each spatial dimension), or a three element list
+            (if time smoothing is desired)
+        time_idx : int
+           which index of time to find the structures for. Default is '0'.
+        """
+        # TODO: save all quantities which are calculated over all times to
+        # speed up structure finding after the first chosen index
+        print("Finding structures at simulation time" +
+              f" {self.timeseries[time_idx]}")
+        b1 = self.variables[b1_name]
+        b2 = self.variables[b2_name]
+
+        if len(self.default_mesh) != 2:
+            raise ValueError("Flux function can only be calculated on"
+                             "2-dimensional meshes, dataset is"
+                             f"{len(self.default_mesh)}-dimensional")
+        if not (len(self.timeseries) == 1):
+            raise ValueError("Currently can do this function"
+                             " for ONLY ONE TIME")
+        if not (np.array_equal(b1.mesh[0], b2.mesh[0]) and
+                np.array_equal(b1.mesh[1], b2.mesh[1])):
+            raise ValueError(f"Given magnetic field components {b1_name} and"
+                             f"{b2_name} do not have the same mesh, so this"
+                             " flux function calculating method is not "
+                             "supported. You'll need to make something"
+                             " up yourself.")
+        # format the smoothing input (0 gives no smoothing)
+        if not hasattr(smoothing, '__len__'):
+            full_smoothing = [0, smoothing, smoothing]
+        elif len(smoothing) == 1:
+            full_smoothing = [0] + list(smoothing) + list(smoothing)
+        elif len(smoothing) == 2:
+            full_smoothing = [0] + list(smoothing)
+        elif len(smoothing) == 3:
+            full_smoothing = smoothing
+        else:
+            raise ValueError(f"incompatible smoothing value {smoothing}")
+        print(full_smoothing)
+        smooth_b1_data = gaussian_filter(b1.data, full_smoothing)
+        smooth_b2_data = gaussian_filter(b2.data, full_smoothing)
+        self._add_var(b1_name+'_smooth', self.variables[b1_name].timeseries,
+                      self.variables[b1_name].mesh, smooth_b1_data)
+        self._add_var(b2_name+'_smooth', self.variables[b2_name].timeseries,
+                      self.variables[b2_name].mesh, smooth_b2_data)
+        
+        if 'flux_fn' not in self.variables.keys():
+            self.calc_fluxfn(b1_name=b1_name+'_smooth',
+                             b2_name=b2_name+'_smooth', **kwargs)
+
+        db2_d1, db2_d2 = np.gradient(smooth_b2_data, *b2.mesh, axis=(1, 2))
+        db1_d1, db1_d2 = np.gradient(smooth_b1_data, *b1.mesh, axis=(1, 2))
+        fluxfn_hessian_det = db1_d2*(-db2_d1) - (-db2_d2)*db1_d1
+
+        # Contour finding using skimage.measure.find_contours
+        zeros_b2 = measure.find_contours(smooth_b2_data[time_idx], 0)
+        zeros_b1 = measure.find_contours(smooth_b1_data[time_idx], 0)
+        # Creating dictionary of interpolators over the indices of the mesh
+        default_meshgrid = np.meshgrid(*b1.mesh, indexing='ij')
+        all_pts = np.stack(default_meshgrid, axis=2)
+        interps = {}
+        idx_mesh = (np.array(range(len(b1.mesh[0]))),
+                    np.array(range(len(b1.mesh[1]))))
+        interps['all_pts'] = interp.RegularGridInterpolator(idx_mesh, all_pts)
+        interps['fluxfn_hessian_det'] = interp.RegularGridInterpolator(
+            idx_mesh, fluxfn_hessian_det[time_idx])
+        interps['flux_fn'] = interp.RegularGridInterpolator(
+            idx_mesh, self.variables['flux_fn'].data[time_idx])
+        """ Finding intersections of zero contours"""
+        # each contour is an m x 2 array for m some other number depending on
+        # the number of points in the contour
+        # break up each contour into m-1 line segments and check if
+        # they intersect each other
+        nulls_list = []
+        for contour_2 in zeros_b2:
+            endpt_2_1 = contour_2[:-1]
+            endpt_2_2 = contour_2[1:]
+            for contour_1 in zeros_b1:
+                endpt_1_1 = contour_1[:-1]
+                endpt_1_2 = contour_1[1:]
+                # check if the 2 contour line segments intersect
+                # any of the 1 contour ones
+                for i in range(endpt_2_1.shape[0]):
+                    endpt_2_1i = endpt_2_1[i].reshape(-1, 2)
+                    endpt_2_2i = endpt_2_2[i].reshape(-1, 2)
+                    # get indices of contour_2 which intercept
+                    intersects = np.nonzero(intersect_true(endpt_1_1,
+                                                           endpt_1_2,
+                                                           endpt_2_1i,
+                                                           endpt_2_2i))[0]
+                    if len(intersects) != 0:  # only add in points that e2ist
+                        intersect_pt = line_intersect(endpt_1_1[intersects],
+                                                      endpt_1_2[intersects],
+                                                      endpt_2_1i, endpt_2_2i)
+                        # round intersections to nearest integer
+                        nulls_list.append(intersect_pt)
+
+        nulls = np.concatenate(nulls_list, axis=0)
+        print("Number of nulls: ", len(nulls))
+
+        # Not doing any sort of combining
+        blobs_arr = nulls
+
+        """ separate out the X and O points """
+        o_idxs = [np.sign(interps['fluxfn_hessian_det'](blobs_arr[i])[0]) == 1
+                  for i in range(blobs_arr.shape[0])]
+        x_idxs = [np.sign(interps['fluxfn_hessian_det'](blobs_arr[i])[0]) == -1
+                  for i in range(blobs_arr.shape[0])]
+        o_coords = blobs_arr[o_idxs]
+        x_coords = blobs_arr[x_idxs]
+        self._add_param('x_coords', x_coords)
+        self._add_param('o_coords', o_coords)
+        """ Add in the variables """
+        self._add_var('fluxfn_hessian_det', b1.timeseries, b1.mesh,
+                      fluxfn_hessian_det)
+        print("NOTE: Not actually calculating the structures"
+              " yet!!!!!!!")
