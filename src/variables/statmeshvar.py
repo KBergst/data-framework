@@ -32,6 +32,32 @@ class StatMeshVar(Variable):
         return a new StatMeshVar which is a subsection of this StatMeshVar
     """
 
+    def bounds(self, time=True, space=True):
+        """Returns the limits of the mesh and/or timeseries
+
+        Parameters
+        ----------
+        time: bool, default True
+            determines if time bounds are returned
+        space: bool, default True
+            determines if space bounds are returned
+
+        Returns
+        -------
+        bounds: list of lists
+            returns [[min0, max0], ... [minN, maxN]] for dimensions 0-N
+            if time is returned it is the zeroth dimension
+        """
+        bounds = []
+
+        if time:
+            bounds.append([min(self.timeseries), max(self.timeseries)])
+        if space:
+            for i in len(self.mesh):
+                bounds.append([min(self.mesh[i]), max(self.mesh[i])])
+        bounds = np.array(bounds)
+        return bounds
+
     def ndslice(self, timelims=None, zooms=None, set_pts=None,
                 interp='linear'):
         """ Returns a Variable which as a slice of the current Variable

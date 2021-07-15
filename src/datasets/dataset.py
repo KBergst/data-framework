@@ -1,4 +1,6 @@
 """ Holds the class for generic datasets """
+import numpy as np
+
 from dataframework.src.variables.dynmeshvar import DynMeshVar
 from dataframework.src.variables.statmeshvar import StatMeshVar
 
@@ -94,7 +96,7 @@ class Dataset():
     def _add_var(self, label, var_tseries, var_mesh, data, verbose=True):
         """ adds or changes a Variable of the Dataset """
         # TODO: adapt to account for possible different timeseries
-        if (hasattr(var_mesh[0][0], '__len__')):  # not a static 1d mesh
+        if hasattr(var_mesh[0][0], '__len__'):  # not a static 1d mesh
             self.variables[label] = DynMeshVar(label, var_tseries,
                                                var_mesh, data)
         else:  # a static mesh
@@ -103,6 +105,37 @@ class Dataset():
 
         if verbose:
             print(f'Added {label} Variable')
+
+    def bounds(self, time=True, space=True, **kwargs):
+        """ Returns the most inclusive limits of the mesh and/or timeseries
+
+        Parameters:
+        ----------
+        time: bool, default True
+            determines if time bounds are returned
+        space: bool, default True
+            determines if space bounds are returned
+        **kwargs: dict
+            any other optional args the variable types take
+
+        Returns
+        -------
+        bounds: list of lists
+            returns [[min0, max0], ... [minN, maxN]] for dimensions 0-N
+            if time is returned it is the zeroth dimension
+        """
+
+        bounds = None
+
+        for var in self.variables.values():
+            varbds = var.bounds(time=time, space=space, **kwargs)
+            if bounds is None:
+                bounds = varbds
+            else:
+                bounds[:, 0] = np.minimum(bounds[:, 0], varbds[:, 0])
+                bounds[:, 1] = np.minimum(bounds[:, 1], varbds[:, 1])
+
+        return bounds
 
     def export(self, filename='dset.out'):
         """ Saves the Dataset object information to a file

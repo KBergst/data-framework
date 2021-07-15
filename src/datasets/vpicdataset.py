@@ -1,13 +1,15 @@
 """ Holds the VPIC dataset handling class."""
 import numpy as np
-import scipy.integrate as integ
+# import scipy.integrate as integ
 import scipy.interpolate as interp
-from scipy.ndimage import gaussian_filter
+import scipy.ndimage as nd
 from skimage import measure
+from skimage.segmentation import flood  # for defining structures
 import pyvpic
 from dataframework.src.datasets.dataset import Dataset
 
 # Some helper functions
+# TODO chuck these somewhere else e.g. utils
 
 
 def uniform(array, atol=1e-3):
@@ -61,6 +63,51 @@ def line_intersect(A, B, C, D):
           / denominator
     p = np.stack([px, py], axis=1)
     return p
+
+
+def gap_fill(array):
+    """ Finds points in the 2d array that could be categorized as 'gaps'
+    And returns a mask for those points
+    I'm sure there's a better way to do this but oh well"""
+    
+    # check if there is a pixel to the center left and a pixel in
+    #  one of the right spaces
+    opp_left = np.logical_and(np.roll(array, 1, axis=1),
+                              (np.abs(np.roll(array, (-1, 1), axis=(1, 0)))
+                               + np.abs(np.roll(array, (-1, -1), axis=(1, 0)))
+                               + np.abs(np.roll(array, -1, axis=1))))
+    # check if there is a pixel to the center right
+    #  and a pixel in one of the left spaces
+    opp_right = np.logical_and(np.roll(array, -1, axis=1),
+                               (np.abs(np.roll(array, (1, -1), axis=(1, 0)))
+                                + np.abs(np.roll(array, (1, 1), axis=(1, 0)))
+                                + np.abs(np.roll(array, 1, axis=1))))
+    # check if there is a pixel to the center top
+    #  and a pixel in one of the bottom spaces
+    opp_up = np.logical_and(np.roll(array, 1, axis=0),
+                            (np.abs(np.roll(array, (-1, 1), axis=(0, 1)))
+                            + np.abs(np.roll(array, (-1, -1), axis=(0, 1)))
+                            + np.abs(np.roll(array, -1, axis=0))))
+    # check if there is a pixel to the center bottom
+    #  and a pixel in one of the top spaces
+    opp_down = np.logical_and(np.roll(array, -1, axis=0),
+                              (np.abs(np.roll(array, (1, 1), axis=(0, 1)))
+                               + np.abs(np.roll(array, (1, -1), axis=(0, 1)))
+                               + np.abs(np.roll(array, 1, axis=0))))
+    # check if either of the diagonals has both pixels
+    opp_diag = np.logical_or(np.logical_and(np.roll(array, (1, 1),
+                                                    axis=(0, 1)),
+                                            np.roll(array, (-1, -1),
+                                                    axis=(0, 1))),
+                             np.logical_and(np.roll(array, (1, -1),
+                                                    axis=(0, 1)),
+                                            np.roll(array, (-1, 1),
+                                                    axis=(0, 1))))
+
+    gap_filled_array = np.logical_or.reduce((array, opp_left, opp_right,
+                                             opp_up, opp_down, opp_diag))
+    # returns ones and zeros for output readability
+    return gap_filled_array.astype(np.int64)
 
 
 class VPICDataset(Dataset):
@@ -118,7 +165,7 @@ class VPICDataset(Dataset):
         if vpicfiles is not None:
             self._init_vpicfile(vpicfiles, **kwargs)
 
-    def _init_vpicfile(self, vpicfiles, interleave=False, get_vars=list('all'),
+    def _init_vpicfile(self, vpicfiles, interleave=False, get_vars=None,
                        **kwargs):
         """ Initializes the VPICDataset from VPIC output files
 
@@ -132,11 +179,13 @@ class VPICDataset(Dataset):
         interleave : bool, default False
             Specifies whether the associated vpic data is interleaved or not.
             Required for the data to be read in correctly.
-        get_vars : list, default ['all']
+        get_vars : list, default None (set to ['all'])
             Allows the user to specify which variables they want to put
             into the Dataset. Default ['all'] takes all
         """
-
+        if get_vars is None:
+            get_vars = ['all']
+            
         self._get_params(vpicfiles[1], **kwargs)
         # get vpic data
         reader = pyvpic.open(vpicfiles[0], interleave=interleave, **kwargs)
@@ -188,6 +237,7 @@ class VPICDataset(Dataset):
             list of strings of the desired parameters (must follow paramfile
             syntax) if None, takes all parameters
         """
+
         # TODO: implement this
         print("NO PARAMS ADDED, FUNCTIONALIITY NOT ADDED YET!!!! SORRY")
 
@@ -231,15 +281,17 @@ class VPICDataset(Dataset):
         flux_fn = np.zeros_like(b1.data)  # flux_fn[:,0,0] = 0
         # integrate the initial value along the first space dimension
         d0 = b2.mesh[0][1] - b2.mesh[0][0]
-        flux_fn[:, :, 0] = np.cumsum(b2.data[:, :, 0]*d0, axis=1)
+        flux_fn_ic = np.cumsum(b2.data[:, :, 0]*d0, axis=1)
         # integrate everything along the second space dimension
         d1 = b2.mesh[1][1] - b2.mesh[1][0]
-        flux_fn = np.cumsum(-b1.data*d1, axis=2)
+        flux_fn = np.cumsum(-b1.data*d1, axis=2) + \
+            np.stack([flux_fn_ic for i in range(flux_fn.shape[-1])], axis=-1)
         # add the new variable
         self._add_var('flux_fn', b1.timeseries, b1.mesh, flux_fn)
 
     def find_structures(self, b1_name='bx', b2_name='bz',
-                        smoothing=3, time_idx=0, **kwargs):
+                        smoothing=3, time_idx=0, de_tol=5,
+                        cs_limit=0.5, **kwargs):
         """
         Finds the structures around the nulls of the simulation
         for 2D VPIC data
@@ -259,6 +311,11 @@ class VPICDataset(Dataset):
             (if time smoothing is desired)
         time_idx : int
            which index of time to find the structures for. Default is '0'.
+        de_tol : float
+           the maximum closest approach in de for a contour to be considered
+           to be passing 'through' an x point
+        cs_limit : float between 0 and 1
+           the fraction of the regional peak current which is part of the sheet
         """
         # TODO: save all quantities which are calculated over all times to
         # speed up structure finding after the first chosen index
@@ -271,9 +328,10 @@ class VPICDataset(Dataset):
             raise ValueError("Flux function can only be calculated on"
                              "2-dimensional meshes, dataset is"
                              f"{len(self.default_mesh)}-dimensional")
-        if not (len(self.timeseries) == 1):
+        if not len(self.timeseries) == 1:
             raise ValueError("Currently can do this function"
                              " for ONLY ONE TIME")
+        # TODO: MAKE IT POSSIBLE TO DO FOR MULTIPLE TIMES AT ONCE
         if not (np.array_equal(b1.mesh[0], b2.mesh[0]) and
                 np.array_equal(b1.mesh[1], b2.mesh[1])):
             raise ValueError(f"Given magnetic field components {b1_name} and"
@@ -281,6 +339,12 @@ class VPICDataset(Dataset):
                              " flux function calculating method is not "
                              "supported. You'll need to make something"
                              " up yourself.")
+        # save the number of grid pts per de as a param
+        dz_per_de = 1/(b1.mesh[0][1]-b1.mesh[0][0])
+        dx_per_de = 1/(b1.mesh[1][1]-b1.mesh[1][0])
+        d_per_de = int((dz_per_de + dx_per_de)/2)
+        self._add_param('d_per_de', d_per_de)
+
         # format the smoothing input (0 gives no smoothing)
         if not hasattr(smoothing, '__len__'):
             full_smoothing = [0, smoothing, smoothing]
@@ -292,17 +356,21 @@ class VPICDataset(Dataset):
             full_smoothing = smoothing
         else:
             raise ValueError(f"incompatible smoothing value {smoothing}")
-        print(full_smoothing)
-        smooth_b1_data = gaussian_filter(b1.data, full_smoothing)
-        smooth_b2_data = gaussian_filter(b2.data, full_smoothing)
+
+        # smooth the magnetic field data
+        smooth_b1_data = nd.gaussian_filter(b1.data, full_smoothing)
+        smooth_b2_data = nd.gaussian_filter(b2.data, full_smoothing)
         self._add_var(b1_name+'_smooth', self.variables[b1_name].timeseries,
                       self.variables[b1_name].mesh, smooth_b1_data)
         self._add_var(b2_name+'_smooth', self.variables[b2_name].timeseries,
                       self.variables[b2_name].mesh, smooth_b2_data)
-        
+
         if 'flux_fn' not in self.variables.keys():
             self.calc_fluxfn(b1_name=b1_name+'_smooth',
                              b2_name=b2_name+'_smooth', **kwargs)
+        else:
+            print("Using previously computed flux function, may be for"
+                  " different fields")
 
         db2_d1, db2_d2 = np.gradient(smooth_b2_data, *b2.mesh, axis=(1, 2))
         db1_d1, db1_d2 = np.gradient(smooth_b1_data, *b1.mesh, axis=(1, 2))
@@ -366,8 +434,93 @@ class VPICDataset(Dataset):
         x_coords = blobs_arr[x_idxs]
         self._add_param('x_coords', x_coords)
         self._add_param('o_coords', o_coords)
+
+        """ define the separatrices and o-type structures """
+        separatrices = []
+
+        for i in range(x_coords.shape[0]):  # I love nested for loops...
+            xline_contours = measure.find_contours(self.variables
+                                                   ['flux_fn'].data[time_idx],
+                                                   level=interps
+                                                   ['flux_fn'](x_coords[i]))
+            local_contours = []
+            for contour in xline_contours:
+                if (min(np.linalg.norm(contour - x_coords[i], axis=1))
+                        <= d_per_de*de_tol):
+                    local_contours.append(contour)
+                # find_contours returns list, let's make a list of lists
+                separatrices.append(local_contours)
+
+        seps_mask = np.zeros_like(self.variables['flux_fn'].data[time_idx])
+        for i, level in enumerate(separatrices):
+            for contour in level:
+
+                # make a mask that should in theory show where
+                #  the separatrices are (pixel by pixel)
+                for point in contour:
+                    seps_mask[tuple(point.astype(np.int64))] = 1
+        # fill in potential gaps in the contours
+        seps_mask_filled = gap_fill(seps_mask)
+        o_structures = np.zeros_like(seps_mask)
+        # create a mask indicating where the o type structures are
+        for i, coord in enumerate(o_coords):
+            if seps_mask_filled[tuple(coord.astype(np.int64))] == 0:
+                new_structure = flood(seps_mask_filled,
+                                      tuple(coord.astype(np.int64)),
+                                      connectivity=1)
+                o_structures = np.logical_or(o_structures, new_structure) \
+                                 .astype(np.int64)
+
+        """ Find the current sheets """
+        smooth_jy = nd.gaussian_filter(self.variables['jy'].data[time_idx],
+                                       full_smoothing[1:])  # no time dim
+        cs_maxes = nd.maximum_filter(smooth_jy, size=(10, 10))
+        cs_mins = nd.minimum_filter(smooth_jy, size=(10, 10))
+        max_thresh = cs_maxes.mean() + cs_maxes.std() * 3
+        min_thresh = cs_mins.mean() - cs_mins.std() * 3
+
+        # find areas greater/less than threshold value
+        max_labels, max_num = nd.label(cs_maxes > max_thresh)
+        min_labels, min_num = nd.label(cs_mins < min_thresh)
+        # Get the positions of the extrema
+        max_coords = nd.maximum_position(smooth_jy, labels=max_labels,
+                                         index=np.arange(1, max_num + 1))
+        min_coords = nd.minimum_position(smooth_jy, labels=min_labels,
+                                         index=np.arange(1, min_num + 1))
+        # Get the extrema values
+        max_values = nd.maximum(smooth_jy, labels=max_labels,
+                                index=np.arange(1, max_num + 1))
+        min_values = nd.minimum(smooth_jy, labels=min_labels,
+                                index=np.arange(1, min_num + 1))
+
+        cs_loc_pos = np.zeros_like(smooth_jy)
+        cs_loc_neg = np.zeros_like(smooth_jy)
+
+        for i in range(max_num):
+            # mask cs values which are "high enough"
+            cs_pos = smooth_jy > max_values[i]*cs_limit
+            # keep only cs which are local to the sheet
+            cs_pos = flood(cs_pos, max_coords[i], connectivity=1)
+            # update mask of all positive current sheets
+            cs_loc_pos = np.logical_or(cs_loc_pos, cs_pos)
+
+        for i in range(min_num):
+            # mask cs values which are "low enough"
+            cs_neg = smooth_jy < min_values[i]*.5
+            # keep only cs which are local to the sheet
+            cs_neg = flood(cs_neg, min_coords[i], connectivity=1)
+            # update mask of all positive current sheets
+            cs_loc_neg = np.logical_or(cs_loc_neg, cs_neg)
+
         """ Add in the variables """
         self._add_var('fluxfn_hessian_det', b1.timeseries, b1.mesh,
                       fluxfn_hessian_det)
-        print("NOTE: Not actually calculating the structures"
-              " yet!!!!!!!")
+        self._add_var('separatrices', b1.timeseries, b1.mesh,
+                      seps_mask_filled
+                      .reshape((-1, *seps_mask_filled.shape)))
+        self._add_var('o_structures', b1.timeseries, b1.mesh,
+                      o_structures.reshape((-1, *o_structures.shape)))
+        self._add_var('current_sheets', b1.timeseries, b1.mesh,
+                      (cs_loc_pos.astype(np.int64)
+                       - cs_loc_neg.astype(np.int64))
+                      .reshape((-1, *cs_loc_pos.shape)))
