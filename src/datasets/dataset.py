@@ -150,7 +150,7 @@ class Dataset():
                          " been implemented, sorry")
 
     def ndslice(self, timelims=None, zooms=None, set_pts=None,
-                interp='linear'):
+                interp='linear', **kwargs):
         """ Returns a Dataset which is a slice of the current Dataset.
 
         Parameters
@@ -168,6 +168,9 @@ class Dataset():
             (should be used for in-situ data).
         interp : string, default 'linear'
             determines interpolation for values in between the mesh
+        ** kwargs : dict
+            holds keyword arguments (if any) passed from the 
+            encompassing dataset (if any)
 
         Returns
         -------
@@ -185,10 +188,17 @@ class Dataset():
             new_vars[orig_var.label] = orig_var.ndslice(timelims=timelims,
                                                         zooms=zooms,
                                                         set_pts=set_pts,
-                                                        interp=interp)
-            
+                                                        interp=interp,
+                                                        **kwargs)
+
         new_timeseries = new_vars[defaults_var].timeseries
         new_mesh = new_vars[defaults_var].mesh
+        slice_params = {}
+        if set_pts is not None:
+            vec = set_pts[1] - set_pts[0]
+            unit_vec = vec/np.linalg.norm(vec)
+            slice_params = {'unit_vec': unit_vec, 'zero_pt': set_pts[0]}
+        new_params = {**self.params, **slice_params}
         slicedset = self.__class__(_datapkg=[new_timeseries, new_mesh,
-                                             self.params, new_vars])
+                                             new_params, new_vars])
         return slicedset

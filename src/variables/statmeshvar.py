@@ -53,13 +53,13 @@ class StatMeshVar(Variable):
         if time:
             bounds.append([min(self.timeseries), max(self.timeseries)])
         if space:
-            for i in len(self.mesh):
+            for i in range(len(self.mesh)):
                 bounds.append([min(self.mesh[i]), max(self.mesh[i])])
         bounds = np.array(bounds)
         return bounds
 
     def ndslice(self, timelims=None, zooms=None, set_pts=None,
-                interp='linear'):
+                interp='linear', **kwargs):
         """ Returns a Variable which as a slice of the current Variable
         
         Parameters
@@ -76,6 +76,9 @@ class StatMeshVar(Variable):
             (should be used for in-situ data).
         interp : string, default 'linear'
             determines interpolation for values in between the mesh
+        ** kwargs : dict
+            holds keyword arguments (if any) passed from the 
+            encompassing dataset (if any)
             
         Returns
         -------
@@ -85,53 +88,56 @@ class StatMeshVar(Variable):
         """
 
         sliced_var = super().ndslice(timelims=timelims, zooms=zooms,
-                                     set_pts=set_pts, interp=interp)
+                                     set_pts=set_pts, interp=interp, **kwargs)
 
         return sliced_var
 
-    def _timeslice(self, timelims):
+    def _timeslice(self, timelims, **kwargs):
         idxs = np.logical_and(self.timeseries >= timelims[0],
                               self.timeseries <= timelims[1])
         # slice the data and the timeseries
         self.timeseries = self.timeseries[idxs]
         self.data = self.data[idxs, :]
 
-    def _zoom(self, zooms):
+    def _zoom(self, zooms, **kwargs):
         for dim in range(len(self.mesh)):
-            idxs = np.logical_and(self.mesh[dim] >= zooms[dim][0],
-                                  self.mesh[dim] <= zooms[dim][1])
+            min_max = np.sort(zooms[dim])
+            idxs = np.logical_and(self.mesh[dim] >= min_max[0],
+                                  self.mesh[dim] <= min_max[1])
             # slice the mesh and the data for each dimension
             self.mesh[dim] = self.mesh[dim][idxs]
             self.data = np.compress(idxs, self.data, axis=dim+1)  # ax 0=t
 
-    def _spaceslice(self, set_pts, interp):
+    def _spaceslice(self, set_pts, interp, **kwargs):
         # can accomodate multiple interpolation options if we need to
-        # right now just going to do linear ND
+        # right now just going to do linear ND ON A GRID
         # only 1D SLICE (line intersect) is supported right now!!!
         # TODO: make this less of a mess (premade stuff?),
         #     maybe move some stuff to utilities
         # have to flatten the array in the space dimensions to get \
         # it to interpolate on the whole mesh
-        meshgrid = np.meshgrid(*self.mesh, indexing='ij')
-        pts = np.column_stack(tuple(meshgrid[i].flatten()
-                                    for i in range(len(meshgrid))))
-        flatdata = np.column_stack(tuple(self.data[i].flatten()
-                                         for i in range(self.data.shape[0])))
-        if interp == 'linear':
+
+        # check for interpolation type override from dataset default
+        if self.label+'interp' in kwargs.keys():
+            print(f"overriding interpolation type {interp} in"
+                  f" variable {self.label} with {kwargs[self.label+'interp']}")
+            var_interp = kwargs[self.label+'interp']
+        else:
+            var_interp = interp
+        # stick the time dimension to the back to do the interp
+        data_rearr = np.stack(tuple(self.data[i] for i in
+                                    range(self.data.shape[0])), axis=-1)
+        if var_interp in ('linear', 'nearest'):
             boxsize = np.fromiter((len(self.mesh[i]) for i in
                                   range(len(self.mesh))), int)
-            non_deg_dims = boxsize != 1
-            if np.sum(non_deg_dims) > 1:
-                datainterp = scipy.interpolate.LinearNDInterpolator(pts,
-                                                                    flatdata)
-            elif np.sum(non_deg_dims) == 1:
-                def oned_wrapped(pts, flatdata):
-                    idx = np.nonzero(non_deg_dims)
-                    return scipy.interpolate.interp1d(pts[:, idx].flatten(),
-                                                      flatdata, axis=0)
-                datainterp = oned_wrapped(pts, flatdata)
+            deg_dims = boxsize <= 1  # notes dimensions with lengths 1 or 0
+            if np.sum(deg_dims) < 1:
+                datainterp = scipy.interpolate.RegularGridInterpolator(
+                    tuple(self.mesh), data_rearr, method=var_interp)
             else:
-                raise ValueError('all dimensions are degenerate')
+                raise ValueError('This interpolation method cannot handle'
+                                 'degenerate dimensions, please reprocesss'
+                                 'to avoid dimensions with size 1')
         else:
             raise ValueError(f'Specified interpolation type {interp} ' +
                              'is not currently implemented')
@@ -171,7 +177,7 @@ class StatMeshVar(Variable):
                                - set_pts[0][dim])/unit_vec[dim]
                     max_dim = (self.mesh[dim][0]
                                - set_pts[0][dim])/unit_vec[dim]
-                    
+
                 # refine where the line collides with the edge of the box
                 min_s = max(min_s, min_dim)
                 max_s = min(max_s, max_dim)
@@ -180,13 +186,8 @@ class StatMeshVar(Variable):
             # calculate new mesh, put in list of arrays (length 1)
             mesh = [np.arange(min_s, max_s, base_dir_dx)]
             # build array in shape (timeseries,mesh)
-            if sum(non_deg_dims) == 1:
-                dat_slice = np.vstack(tuple(datainterp((set_pts[0] +
-                                            t*unit_vec)[non_deg_dims])
-                                            for t in mesh[0])).T
-            else:
-                dat_slice = np.vstack(tuple(datainterp(set_pts[0] + t*unit_vec)
-                                            for t in mesh[0])).T
+            dat_slice = np.vstack(tuple(datainterp(set_pts[0] + t*unit_vec)
+                                        for t in mesh[0])).T
 
         else:
             raise ValueError('slices in more than 1d are not currently ' +

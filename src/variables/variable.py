@@ -32,7 +32,7 @@ class Variable(abc.ABC):
         self.data = data
 
     def ndslice(self, timelims=None, zooms=None, set_pts=None,
-                interp='linear'):
+                interp='linear', **kwargs):
         """ Returns a Variable which as a slice of the current Variable
 
         Parameters
@@ -54,6 +54,10 @@ class Variable(abc.ABC):
             shapes and are too hard for right now
         interp : string, default 'linear'
             determines interpolation for values in between the mesh
+        ** kwargs : dict
+            holds keyword arguments (if any) passed from the 
+            encompassing dataset (if any)
+
 
         Returns
         -------
@@ -67,22 +71,22 @@ class Variable(abc.ABC):
         # variable does surgery on its clone. Maybe not ~pythonic~
         # maybe instead of slicedvar use as backup then do a switcheroo
         if timelims is not None:
-            slicedvar._timeslice(timelims)
+            slicedvar._timeslice(timelims, **kwargs)
         if zooms is not None:
-            slicedvar._zoom(zooms)
+            slicedvar._zoom(zooms, **kwargs)
         if set_pts is not None:
-            slicedvar._spaceslice(set_pts, interp)
+            slicedvar._spaceslice(set_pts, interp, **kwargs)
 
         return slicedvar
 
     @abc.abstractmethod
-    def _zoom(self, zooms):
+    def _zoom(self, zooms, **kwargs):
         pass
 
     @abc.abstractmethod
-    def _timeslice(self, timelims):
+    def _timeslice(self, timelims, **kwargs):
         pass
 
     @abc.abstractmethod
-    def _spaceslice(self, set_pts, interp):
+    def _spaceslice(self, set_pts, interp, **kwargs):
         pass
