@@ -5,8 +5,11 @@ import scipy.interpolate as interp
 import scipy.ndimage as nd
 from skimage import measure
 from skimage.segmentation import flood  # for defining structures
+from skimage.morphology import binary_dilation  # for closing x point
 import pyvpic
 from dataframework.src.datasets.dataset import Dataset
+
+rng = np.random.default_rng(125)
 
 # Some helper functions
 # TODO chuck these somewhere else e.g. utils
@@ -289,7 +292,7 @@ class VPICDataset(Dataset):
         # add the new variable
         self._add_var('flux_fn', b1.timeseries, b1.mesh, flux_fn)
 
-    def find_structures(self, b1_name='bx', b2_name='bz',
+    def find_structures(self, b1_name='b1', b2_name='b2',
                         smoothing=3, time_idx=0, de_tol=5,
                         cs_limit=0.5, **kwargs):
         """
@@ -298,10 +301,10 @@ class VPICDataset(Dataset):
  
        Parameters
         ----------
-        bl_name : str, default 'bx'
+        b1_name : str, default 'b1'
             names variable to be used as the magnetic field component
             in the first direction
-        b2_name : str, default 'bz'
+        b2_name : str, default 'b2'
             names variable to be used as the magnetic field component
             in the second direction
         smoothing : int or list, default '3'
@@ -436,40 +439,44 @@ class VPICDataset(Dataset):
         self._add_param('o_coords', o_coords)
 
         """ define the separatrices and o-type structures """
-        separatrices = []
-
+        seps_mask = np.zeros_like(self.variables['flux_fn'].data[time_idx])
+        o_structures = np.zeros_like(seps_mask)
         for i in range(x_coords.shape[0]):  # I love nested for loops...
             xline_contours = measure.find_contours(self.variables
                                                    ['flux_fn'].data[time_idx],
                                                    level=interps
                                                    ['flux_fn'](x_coords[i]))
-            local_contours = []
+            xpt_mask = np.zeros_like(seps_mask)
+            xpt_mask[tuple(x_coords[i].astype(np.int64))] = 1
+            xpt_mask = binary_dilation(xpt_mask).astype(np.int64)
+            local_seps = np.zeros_like(seps_mask)
+            local_seps = np.logical_or(local_seps, xpt_mask)
             for contour in xline_contours:
                 if (min(np.linalg.norm(contour - x_coords[i], axis=1))
                         <= d_per_de*de_tol):
-                    local_contours.append(contour)
-                # find_contours returns list, let's make a list of lists
-                separatrices.append(local_contours)
+                    for point in contour:
+                        local_seps[tuple(point.astype(np.int64))] = 1
 
-        seps_mask = np.zeros_like(self.variables['flux_fn'].data[time_idx])
-        for i, level in enumerate(separatrices):
-            for contour in level:
+            # fill in potential gaps in the contours
+            local_seps_filled = gap_fill(local_seps)
+            seps_mask = np.logical_or(seps_mask, local_seps_filled)
 
-                # make a mask that should in theory show where
-                #  the separatrices are (pixel by pixel)
-                for point in contour:
-                    seps_mask[tuple(point.astype(np.int64))] = 1
-        # fill in potential gaps in the contours
-        seps_mask_filled = gap_fill(seps_mask)
-        o_structures = np.zeros_like(seps_mask)
-        # create a mask indicating where the o type structures are
-        for i, coord in enumerate(o_coords):
-            if seps_mask_filled[tuple(coord.astype(np.int64))] == 0:
-                new_structure = flood(seps_mask_filled,
-                                      tuple(coord.astype(np.int64)),
-                                      connectivity=1)
-                o_structures = np.logical_or(o_structures, new_structure) \
-                                 .astype(np.int64)
+            # fill in all the sections according to their geometry
+            while np.sum(local_seps_filled == 0) > 0:
+                # select a random 0-valued point
+                indices = np.nonzero(local_seps_filled == 0)
+                random_int = rng.integers(len(indices[0]))
+                random_idx = (indices[0][random_int], indices[1][random_int])
+                structure_candidate = flood(local_seps_filled, random_idx,
+                                            connectivity=1)
+                local_seps_filled += -1*structure_candidate  # region
+                if  (np.all(structure_candidate[0, :] == 0) and  # no collision
+                     np.all(structure_candidate[-1, :] == 0) and     # w/ bdy
+                     np.all(structure_candidate[:, 0] == 0) and
+                     np.all(structure_candidate[:, -1] == 0)):
+                    o_structures = np.logical_or(o_structures,
+                                                 structure_candidate) \
+                                                 .astype(np.int64)
 
         """ Find the current sheets """
         smooth_jy = nd.gaussian_filter(self.variables['jy'].data[time_idx],
@@ -516,8 +523,8 @@ class VPICDataset(Dataset):
         self._add_var('fluxfn_hessian_det', b1.timeseries, b1.mesh,
                       fluxfn_hessian_det)
         self._add_var('separatrices', b1.timeseries, b1.mesh,
-                      seps_mask_filled
-                      .reshape((-1, *seps_mask_filled.shape)))
+                      seps_mask
+                      .reshape((-1, *seps_mask.shape)))
         self._add_var('o_structures', b1.timeseries, b1.mesh,
                       o_structures.reshape((-1, *o_structures.shape)))
         self._add_var('current_sheets', b1.timeseries, b1.mesh,

@@ -25,6 +25,10 @@ class Dataset():
         returns a subsection (slice) of the data
     export(filename = 'dset.out')
         saves the Dataset object to a file
+    add_param(self, key, value, verbose=True)
+        public wrapper of _add_param in case I need to add functionality
+    add_var(self, label, var_tseries, var_mesh, data, verbose=True)
+       public wrapper of _add_var in case I need to add functionality
     """
 
     def __init__(self, _datapkg=None, dsfile=None, **kwargs):
@@ -105,6 +109,45 @@ class Dataset():
 
         if verbose:
             print(f'Added {label} Variable')
+
+    def add_param(self, key, value, verbose=True):
+        """ Add the given parameter to the dateset's parameter dict
+
+        Parameters:
+        -----------
+        key: string
+            the label for the parameter
+        value: anything
+            the value of the parameter (may be anything)
+
+        Returns:
+        --------
+        None
+        """
+
+        self._add_param(key, value, verbose=verbose)
+
+    def add_var(self, label, var_tseries, var_mesh, data, verbose=True):
+        """ Add the given variable to the dataset object
+
+        Parameters:
+        label: string
+            the name of the variable to be used as a key
+        var_tseries: array-like
+            the timeseries for the variable
+        var_mesh: list of 1d arrays
+            the mesh the data is defined on
+        data: array-like
+            the data for the variable. array shape (time_length, x, y,...)
+        verbose: bool, default True
+            defines whether the function states what it is doing
+
+        Returns
+        -------
+        None
+        """
+
+        self._add_var(label, var_tseries, var_mesh, data, verbose=verbose)
 
     def bounds(self, time=True, space=True, **kwargs):
         """ Returns the most inclusive limits of the mesh and/or timeseries
